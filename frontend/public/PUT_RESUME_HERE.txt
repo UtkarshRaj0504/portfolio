@@ -1,0 +1,5 @@
+Drop your real resume PDF in this folder and name it resume.pdf
+(i.e. public/resume.pdf). The "Download Resume" button links to /resume.pdf.
+
+Delete this file once resume.pdf is in place — it's just a placeholder
+so the folder isn't empty in version control.
