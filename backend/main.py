@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, HTTPException
 import logging
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -36,12 +39,17 @@ cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5174,http://127.0.0.1
 
 app = FastAPI()
 
+# Setup rate limiter (20 requests per minute per IP)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+
+# Tighten CORS - only allow specific methods and headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Only necessary methods
+    allow_headers=["Content-Type"],  # Only necessary headers
 )
 
 
@@ -69,6 +77,19 @@ resume_schema = Resume.model_json_schema()
 
 class ChatRequest(BaseModel):
     question: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {"question": "Tell me about your projects"}
+        }
+
+    def validate_question(self):
+        """Validate question input"""
+        if not self.question or not self.question.strip():
+            raise ValueError("Question cannot be empty")
+        if len(self.question) > 2000:
+            raise ValueError("Question too long (max 2000 characters)")
+        return self.question.strip()
 
 def ask_candidate_stream(question: str, resume: Resume):
     """Stream response from LLM about the candidate. Returns generator yielding text chunks."""
@@ -267,18 +288,23 @@ def reload_resume():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
+@limiter.limit("20/minute")  # Rate limit: 20 requests per minute per IP
 def chat(request: ChatRequest):
     """Stream chat response about the candidate."""
-    if not request.question or not request.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    # Validate input
+    try:
+        question = request.validate_question()
+    except ValueError as e:
+        logger.warning(f"Invalid input: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     try:
         resume = get_cached_resume()
-        logger.info(f"Answering question: {request.question[:100]}...")
+        logger.info(f"Answering question: {question[:100]}...")
 
         def generate():
             try:
-                for chunk in ask_candidate_stream(request.question, resume):
+                for chunk in ask_candidate_stream(question, resume):
                     yield chunk
             except Exception as e:
                 logger.error(f"Error during streaming: {e}")
